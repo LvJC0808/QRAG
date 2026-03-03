@@ -1,0 +1,1 @@
+Retrieve document pages relevant to scientific question answering, prioritizing factual support, numeric details, tables, and figure-grounded evidence.
