@@ -1,0 +1,13 @@
+{
+  "dataset": "vidore_v3_computer_science",
+  "input_dir": "/root/shared-nvme/QRAG/vidore_v3_computer_science",
+  "output_dir": "/root/shared-nvme/QRAG/data/benchmark_samples/vidore_v3_cs",
+  "min_score": 1,
+  "num_queries_total": 1290,
+  "num_qrels_total": 6294,
+  "num_query_doc_pairs": 1314,
+  "per_doc_counts": {
+    "Introduction_to_Computer_Science": 816,
+    "Introduction_to_Python_Programming": 498
+  }
+}

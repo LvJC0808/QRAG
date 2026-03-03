@@ -29,9 +29,23 @@ def short_snippet(text: str, max_chars: int = 320) -> str:
     return cleaned[: max_chars - 3] + "..."
 
 
+def make_chunk_ref(page_num: int, order: int) -> str:
+    return f"p{int(page_num)}-c{int(order)}"
+
+
 def extract_citations(markdown_text: str) -> List[int]:
-    hits = re.findall(r"\[p(\d+)\]", markdown_text or "")
+    text = markdown_text or ""
+    hits = re.findall(r"\[p(\d+)(?:-c\d+)?\]", text)
+    if not hits:
+        hits = re.findall(r"\[p(\d+)\]", text)
     return sorted({int(item) for item in hits})
+
+
+def extract_chunk_citations(markdown_text: str) -> List[str]:
+    text = markdown_text or ""
+    hits = re.findall(r"\[(p\d+-c\d+)\]", text)
+    normalized = [item.lower() for item in hits]
+    return sorted(set(normalized))
 
 
 def safe_mean(values: Iterable[float]) -> float:

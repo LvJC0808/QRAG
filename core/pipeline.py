@@ -7,9 +7,9 @@ from typing import List, Optional
 from ..config import GenerationDefaults, JudgeDefaults, RetrievalDefaults
 from ..schemas import (
     AnswerBundle,
+    ChunkRecord,
     EvidenceItem,
     GenerationConfig,
-    PageRecord,
     PipelineState,
     RetrievalCandidate,
     RetrievalConfig,
@@ -21,7 +21,7 @@ from .index_store import IndexStore
 from .judge import Qwen3VLJudgeService
 from .pdf_ingest import PDFIngestor
 from .reranker import Qwen3VLRerankerService
-from .utils import extract_citations, short_snippet
+from .utils import extract_chunk_citations, extract_citations, make_chunk_ref, short_snippet
 
 
 class QRAGPipeline:
@@ -53,6 +53,11 @@ class QRAGPipeline:
         self.index = DenseExactIndex()
         self.state = PipelineState()
         self.last_bundle: AnswerBundle | None = None
+        self._chunks: List[ChunkRecord] = []
+        self._chunk_lookup: dict[tuple[int, int], ChunkRecord] = {}
+        self.visual_retrieval_instruction = (
+            "Retrieve chunks with strong visual evidence, including figures, tables, and numeric details."
+        )
 
     def default_retrieval_config(self) -> RetrievalConfig:
         return RetrievalConfig(
@@ -70,34 +75,137 @@ class QRAGPipeline:
         )
 
     def ingest_pdf(self, pdf_path: str | Path) -> PipelineState:
-        doc_id, pages = self.ingestor.ingest(pdf_path)
-        embeddings = self.embedder.embed_pages(pages, instruction=self.retrieval_instruction)
+        doc_id, page_count, chunks = self.ingestor.ingest(pdf_path)
+        embeddings = self.embedder.embed_chunks(chunks, instruction=self.retrieval_instruction)
         index_path = self.index_store.save(
             doc_id=doc_id,
             embeddings=embeddings,
-            pages=pages,
+            chunks=chunks,
             model_name=self.embedder.model_name,
         )
 
-        self.index.build(embeddings, [page.model_dump() for page in pages])
+        self.index.build(embeddings, [chunk.model_dump() for chunk in chunks])
+        self._chunks = chunks
+        self._chunk_lookup = {(item.page_num, item.order): item for item in chunks}
         self.state = PipelineState(
             doc_id=doc_id,
             index_path=str(index_path),
-            page_count=len(pages),
+            page_count=page_count,
+            chunk_count=len(chunks),
             ready=True,
         )
         return self.state
 
     def load_index(self, index_path: str | Path) -> PipelineState:
-        embeddings, pages, manifest = self.index_store.load(index_path)
-        self.index.build(embeddings, [item.model_dump() for item in pages])
+        embeddings, chunks, manifest = self.index_store.load(index_path)
+        self.index.build(embeddings, [item.model_dump() for item in chunks])
+        self._chunks = chunks
+        self._chunk_lookup = {(item.page_num, item.order): item for item in chunks}
+        page_count = int(manifest.get("page_count", len({item.page_num for item in chunks})))
         self.state = PipelineState(
             doc_id=str(manifest.get("doc_id", "unknown")),
             index_path=str(Path(index_path).resolve()),
-            page_count=len(pages),
+            page_count=page_count,
+            chunk_count=int(manifest.get("chunk_count", len(chunks))),
             ready=True,
         )
         return self.state
+
+    def _expand_with_neighbors(
+        self, candidates: List[RetrievalCandidate], target_size: int
+    ) -> List[RetrievalCandidate]:
+        if not candidates or not self._chunk_lookup:
+            return candidates
+
+        merged: List[RetrievalCandidate] = []
+        seen_ids: set[str] = set()
+
+        def _append_candidate(candidate: RetrievalCandidate, score: float) -> None:
+            cache_key = candidate.chunk_id or f"p{candidate.page_num}_o{candidate.order}"
+            if cache_key in seen_ids:
+                return
+            seen_ids.add(cache_key)
+            merged.append(
+                RetrievalCandidate(
+                    chunk_id=candidate.chunk_id,
+                    page_num=candidate.page_num,
+                    order=candidate.order,
+                    chunk_type=candidate.chunk_type,
+                    text=candidate.text,
+                    image_path=candidate.image_path,
+                    bbox=candidate.bbox,
+                    score=score,
+                )
+            )
+
+        for cand in candidates:
+            _append_candidate(cand, cand.score)
+            for delta in (-1, 1):
+                neighbor = self._chunk_lookup.get((cand.page_num, cand.order + delta))
+                if neighbor is None:
+                    continue
+                # Keep a slight score decay for neighboring context chunks.
+                _append_candidate(
+                    RetrievalCandidate(
+                        chunk_id=neighbor.chunk_id,
+                        page_num=neighbor.page_num,
+                        order=neighbor.order,
+                        chunk_type=neighbor.chunk_type,
+                        text=neighbor.text,
+                        image_path=neighbor.image_path,
+                        bbox=neighbor.bbox,
+                        score=cand.score * 0.97,
+                    ),
+                    cand.score * 0.97,
+                )
+
+            if len(merged) >= target_size:
+                break
+
+        merged.sort(key=lambda item: item.score, reverse=True)
+        return merged[:target_size]
+
+    def _rrf_fuse(
+        self,
+        primary: List[RetrievalCandidate],
+        secondary: List[RetrievalCandidate],
+        top_k: int,
+    ) -> List[RetrievalCandidate]:
+        if not secondary:
+            return primary[:top_k]
+
+        denom = 60.0
+        fusion: dict[str, tuple[RetrievalCandidate, float]] = {}
+
+        def add(items: List[RetrievalCandidate], weight: float) -> None:
+            for rank, item in enumerate(items, start=1):
+                key = item.chunk_id or make_chunk_ref(item.page_num, item.order)
+                score = weight * (1.0 / (denom + rank))
+                if key in fusion:
+                    old_item, old_score = fusion[key]
+                    fusion[key] = (old_item, old_score + score)
+                else:
+                    fusion[key] = (item, score)
+
+        add(primary, 0.7)
+        add(secondary, 0.3)
+
+        ranked = sorted(fusion.values(), key=lambda x: x[1], reverse=True)
+        output: List[RetrievalCandidate] = []
+        for item, fused_score in ranked[:top_k]:
+            output.append(
+                RetrievalCandidate(
+                    chunk_id=item.chunk_id,
+                    page_num=item.page_num,
+                    order=item.order,
+                    chunk_type=item.chunk_type,
+                    text=item.text,
+                    image_path=item.image_path,
+                    bbox=item.bbox,
+                    score=fused_score,
+                )
+            )
+        return output
 
     def _build_evidence(
         self,
@@ -108,9 +216,13 @@ class QRAGPipeline:
         for candidate, rerank_score in reranked[: max(1, min(evidence_top_m, len(reranked)))]:
             evidence.append(
                 EvidenceItem(
+                    chunk_id=candidate.chunk_id,
                     page_num=candidate.page_num,
+                    order=candidate.order,
+                    chunk_type=candidate.chunk_type,
                     image_path=candidate.image_path,
                     snippet=short_snippet(candidate.text, 500),
+                    bbox=candidate.bbox,
                     retrieval_score=float(candidate.score),
                     rerank_score=float(rerank_score),
                 )
@@ -140,10 +252,16 @@ class QRAGPipeline:
 
         t0 = time.perf_counter()
         query_vec = self.embedder.embed_query(query, instruction=self.retrieval_instruction)
+        visual_query_vec = self.embedder.embed_query(
+            query, instruction=self.visual_retrieval_instruction
+        )
         timings["embedding_query_s"] = time.perf_counter() - t0
 
         t1 = time.perf_counter()
-        recall = self.index.search(query_vec, top_k=r_cfg.recall_top_k)
+        recall_main = self.index.search(query_vec, top_k=r_cfg.recall_top_k)
+        recall_visual = self.index.search(visual_query_vec, top_k=r_cfg.recall_top_k)
+        recall = self._rrf_fuse(recall_main, recall_visual, top_k=r_cfg.recall_top_k)
+        recall = self._expand_with_neighbors(recall, target_size=r_cfg.recall_top_k * 2)
         timings["dense_retrieval_s"] = time.perf_counter() - t1
 
         t2 = time.perf_counter()
@@ -199,6 +317,7 @@ class QRAGPipeline:
             draft_answer=draft,
             final_answer=final_answer,
             citations=extract_citations(final_answer),
+            citation_chunk_ids=extract_chunk_citations(final_answer),
             evidence_items=evidence,
             judge_result=judge_result,
             timings=timings,

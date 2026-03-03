@@ -8,7 +8,7 @@ from qwen_vl_utils import process_vision_info
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
 from ..schemas import EvidenceItem, GenerationConfig
-from .utils import short_snippet
+from .utils import make_chunk_ref, short_snippet
 
 
 class Qwen3VLGeneratorService:
@@ -89,6 +89,7 @@ class Qwen3VLGeneratorService:
     def _build_evidence_payload(self, evidence: List[EvidenceItem], max_pixels: int) -> List[dict]:
         payload: List[dict] = []
         for item in evidence:
+            ref_id = make_chunk_ref(item.page_num, item.order)
             payload.append(
                 {
                     "type": "image",
@@ -99,7 +100,10 @@ class Qwen3VLGeneratorService:
             payload.append(
                 {
                     "type": "text",
-                    "text": f"[p{item.page_num}] snippet: {short_snippet(item.snippet, 280)}",
+                    "text": (
+                        f"[{ref_id}] page={item.page_num} order={item.order} type={item.chunk_type} "
+                        f"snippet: {short_snippet(item.snippet, 280)}"
+                    ),
                 }
             )
         return payload
@@ -115,7 +119,7 @@ class Qwen3VLGeneratorService:
         text_prompt = (
             f"{self.prompt_template}\n\n"
             f"User question: {query}\n"
-            "Use only provided evidence, cite with [pX], and keep the required section headers."
+            "Use only provided evidence, cite with [pX-cY], and keep the required section headers."
         )
 
         messages = [

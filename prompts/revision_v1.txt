@@ -8,4 +8,5 @@ Rules:
    - 关键证据（含页码）
    - 数据表
    - 局限性/不确定性
-4) Do not invent evidence not present in pages.
+4) Do not invent evidence not present in evidence chunks.
+5) Use citation format [pX-cY] for factual claims.

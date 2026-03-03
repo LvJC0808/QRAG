@@ -33,6 +33,11 @@ class RuntimeConfig:
     judge_device: str = os.getenv("QRAG_JUDGE_DEVICE", "cuda:3")
     torch_dtype: str = os.getenv("QRAG_TORCH_DTYPE", "bfloat16")
     attn_implementation: str = os.getenv("QRAG_ATTN_IMPL", "flash_attention_2")
+    embed_batch_size: int = _env_int("QRAG_EMBED_BATCH_SIZE", 4)
+    ingest_dpi: int = _env_int("QRAG_INGEST_DPI", 160)
+    ingest_text_chunk_chars: int = _env_int("QRAG_INGEST_TEXT_CHARS", 900)
+    ingest_text_chunk_tokens: int = _env_int("QRAG_INGEST_TEXT_TOKENS", 220)
+    ingest_text_overlap_tokens: int = _env_int("QRAG_INGEST_TEXT_OVERLAP", 40)
 
 
 @dataclass(slots=True)

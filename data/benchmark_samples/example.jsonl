@@ -1,0 +1,2 @@
+{"id":"q1","query":"What is the main objective of this paper?","gold_pages":[1],"gold_chunk_ids":["p1-c1"],"reference_answer":"The paper introduces Qwen3-VL-Embedding and Qwen3-VL-Reranker for multimodal retrieval."}
+{"id":"q2","query":"How does the reranker compute relevance?","gold_pages":[2],"gold_chunk_ids":["p2-c2"],"reference_answer":"It computes a yes/no relevance probability for query-document pairs."}

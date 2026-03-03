@@ -31,7 +31,13 @@ def create_pipeline(runtime: RuntimeConfig | None = None) -> QRAGPipeline:
     judge_template = read_text_file(PROMPTS_DIR / "judge_v1.txt")
     retrieval_instruction = read_text_file(PROMPTS_DIR / "retrieval_instruction_v1.txt")
 
-    ingestor = PDFIngestor(cache_root=CACHE_DIR)
+    ingestor = PDFIngestor(
+        cache_root=CACHE_DIR,
+        dpi=runtime.ingest_dpi,
+        text_chunk_chars=runtime.ingest_text_chunk_chars,
+        text_chunk_tokens=runtime.ingest_text_chunk_tokens,
+        text_overlap_tokens=runtime.ingest_text_overlap_tokens,
+    )
     index_store = IndexStore(root_dir=INDEX_DIR)
 
     embedder = Qwen3VLEmbeddingService(
@@ -39,6 +45,7 @@ def create_pipeline(runtime: RuntimeConfig | None = None) -> QRAGPipeline:
         device=runtime.embed_device,
         dtype=runtime.torch_dtype,
         attn_implementation=runtime.attn_implementation,
+        batch_size=runtime.embed_batch_size,
     )
     reranker = Qwen3VLRerankerService(
         model_path=Path(RERANK_MODEL_PATH),

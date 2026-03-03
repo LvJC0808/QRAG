@@ -25,17 +25,36 @@ class PageRecord(BaseModel):
     image_path: str
 
 
-class RetrievalCandidate(BaseModel):
+class ChunkRecord(BaseModel):
+    doc_id: str
+    chunk_id: str
     page_num: int
+    order: int
+    chunk_type: str = "text"
     text: str
     image_path: str
+    bbox: List[float] = Field(default_factory=list)
+
+
+class RetrievalCandidate(BaseModel):
+    chunk_id: str = ""
+    page_num: int
+    order: int = 0
+    chunk_type: str = "text"
+    text: str
+    image_path: str
+    bbox: List[float] = Field(default_factory=list)
     score: float
 
 
 class EvidenceItem(BaseModel):
+    chunk_id: str = ""
     page_num: int
+    order: int = 0
+    chunk_type: str = "text"
     image_path: str
     snippet: str
+    bbox: List[float] = Field(default_factory=list)
     retrieval_score: float
     rerank_score: float
 
@@ -61,6 +80,7 @@ class AnswerBundle(BaseModel):
     draft_answer: str
     final_answer: str
     citations: List[int]
+    citation_chunk_ids: List[str] = Field(default_factory=list)
     evidence_items: List[EvidenceItem]
     judge_result: JudgeResult
     timings: Dict[str, float]
@@ -70,6 +90,7 @@ class PipelineState(BaseModel):
     doc_id: Optional[str] = None
     index_path: Optional[str] = None
     page_count: int = 0
+    chunk_count: int = 0
     ready: bool = False
 
 

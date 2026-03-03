@@ -54,9 +54,13 @@ class DenseExactIndex(VectorIndex):
             meta = self._metadata[i]
             results.append(
                 RetrievalCandidate(
+                    chunk_id=str(meta.get("chunk_id", "")),
                     page_num=int(meta["page_num"]),
+                    order=int(meta.get("order", i)),
+                    chunk_type=str(meta.get("chunk_type", "text")),
                     text=str(meta["text"]),
                     image_path=str(meta["image_path"]),
+                    bbox=[float(v) for v in meta.get("bbox", [])],
                     score=float(scores[i]),
                 )
             )

@@ -47,15 +47,22 @@ class JudgeTuner:
         self,
         queries: Iterable[str],
         image_max_pixels_grid: List[int] | None = None,
+        quick_mode: bool = False,
     ) -> TuningSummary:
         query_list = [q.strip() for q in queries if q.strip()]
         if not query_list:
             raise ValueError("At least one evaluation query is required")
 
-        recall_grid = [12, 24, 36]
-        rerank_grid = [4, 8, 12]
-        evidence_grid = [3, 4, 5]
-        pixel_grid = image_max_pixels_grid or [768 * 768, 1024 * 1024, 1280 * 1280]
+        if quick_mode:
+            recall_grid = [12, 24]
+            rerank_grid = [6, 8]
+            evidence_grid = [3, 4]
+            pixel_grid = image_max_pixels_grid or [768 * 768, 1024 * 1024]
+        else:
+            recall_grid = [12, 24, 36]
+            rerank_grid = [4, 8, 12]
+            evidence_grid = [3, 4, 5]
+            pixel_grid = image_max_pixels_grid or [768 * 768, 1024 * 1024, 1280 * 1280]
 
         runs: List[TuningRunResult] = []
         for recall_top_k, rerank_top_n, evidence_top_m, image_max_pixels in itertools.product(

@@ -5,7 +5,7 @@ Evaluate the answer with five dimensions (0-100):
 - groundedness
 - completeness
 - numeric_consistency
-- citation_validity
+- citation_validity (verify [pX-cY] references map to provided evidence chunks)
 
 Return JSON only with this schema:
 {

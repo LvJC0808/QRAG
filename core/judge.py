@@ -9,7 +9,7 @@ import torch
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
 from ..schemas import DimensionScores, EvidenceItem, JudgeResult
-from .utils import short_snippet
+from .utils import make_chunk_ref, short_snippet
 
 
 class Qwen3VLJudgeService:
@@ -118,7 +118,8 @@ class Qwen3VLJudgeService:
 
     def evaluate(self, query: str, answer: str, evidence_items: List[EvidenceItem]) -> JudgeResult:
         evidence_lines = [
-            f"[p{item.page_num}] {short_snippet(item.snippet, 220)}"
+            f"[{make_chunk_ref(item.page_num, item.order)}] [p{item.page_num}] "
+            f"{short_snippet(item.snippet, 220)}"
             for item in evidence_items
         ]
         evidence_block = "\n".join(evidence_lines) if evidence_lines else "No evidence provided"

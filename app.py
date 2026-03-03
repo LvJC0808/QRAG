@@ -8,6 +8,7 @@ import pandas as pd
 
 from .config import DATA_DIR
 from .core.tuner import JudgeTuner
+from .core.utils import make_chunk_ref
 from .pipeline_factory import create_pipeline
 from .schemas import GenerationConfig, RetrievalConfig
 
@@ -24,7 +25,8 @@ def _format_state() -> str:
         f"Ready\n"
         f"doc_id: {state.doc_id}\n"
         f"index_path: {state.index_path}\n"
-        f"page_count: {state.page_count}"
+        f"page_count: {state.page_count}\n"
+        f"chunk_count: {state.chunk_count}"
     )
 
 
@@ -108,7 +110,8 @@ def ask_question(
         gallery = [
             (
                 item.image_path,
-                f"p{item.page_num} | retrieval={item.retrieval_score:.3f} | rerank={item.rerank_score:.3f}",
+                f"{make_chunk_ref(item.page_num, item.order)} (p{item.page_num}) | {item.chunk_type} | "
+                f"retrieval={item.retrieval_score:.3f} | rerank={item.rerank_score:.3f}",
             )
             for item in bundle.evidence_items
         ]
@@ -118,13 +121,13 @@ def ask_question(
         return f"Pipeline error: {exc}", "", [], {}
 
 
-def run_tuning(queries_text: str):
+def run_tuning(queries_text: str, quick_mode: bool):
     query_lines = [line.strip() for line in (queries_text or "").splitlines() if line.strip()]
     if not query_lines:
         return pd.DataFrame(), "Please input at least one evaluation query."
 
     try:
-        summary = tuner.run_grid(query_lines)
+        summary = tuner.run_grid(query_lines, quick_mode=quick_mode)
         rows = []
         for run in summary.runs:
             rows.append(
@@ -145,6 +148,7 @@ def run_tuning(queries_text: str):
             "## Tuning Complete\n"
             f"- Best run: `{summary.best_run_id}`\n"
             f"- Best objective: **{summary.best_objective_score:.3f}**\n"
+            f"- Mode: {'quick' if quick_mode else 'full'}\n"
             f"- Best config: recall_top_k={best.recall_top_k}, "
             f"rerank_top_n={best.rerank_top_n}, evidence_top_m={best.evidence_top_m}, "
             f"image_max_pixels={best.image_max_pixels}"
@@ -225,10 +229,15 @@ def build_ui() -> gr.Blocks:
                 placeholder="示例:\n论文提出的核心方法是什么？\n图2展示了哪些模块？\n提取表1中的关键指标。",
             )
             tune_btn = gr.Button("运行网格调优", variant="primary")
+            quick_mode_cb = gr.Checkbox(value=True, label="快速模式（更少组合，更快）")
             tune_table = gr.Dataframe(label="调优结果", interactive=False)
             tune_summary = gr.Markdown(label="最佳配置")
 
-            tune_btn.click(fn=run_tuning, inputs=[tune_queries], outputs=[tune_table, tune_summary])
+            tune_btn.click(
+                fn=run_tuning,
+                inputs=[tune_queries, quick_mode_cb],
+                outputs=[tune_table, tune_summary],
+            )
 
     return demo
 

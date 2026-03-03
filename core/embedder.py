@@ -6,7 +6,7 @@ from typing import Iterable, List
 import numpy as np
 import torch
 
-from ..schemas import PageRecord
+from ..schemas import ChunkRecord
 from .model_loader import import_module_from_path
 
 
@@ -17,11 +17,13 @@ class Qwen3VLEmbeddingService:
         device: str,
         dtype: str = "bfloat16",
         attn_implementation: str = "flash_attention_2",
+        batch_size: int = 4,
     ) -> None:
         self.model_path = model_path
         self.device = device
         self.dtype = dtype
         self.attn_implementation = attn_implementation
+        self.batch_size = max(1, int(batch_size))
         self._model = None
 
     @property
@@ -63,19 +65,47 @@ class Qwen3VLEmbeddingService:
         return np.asarray(tensor_or_array)
 
     def embed_items(self, items: List[dict], normalize: bool = True) -> np.ndarray:
+        if not items:
+            return np.zeros((0, 1), dtype=np.float32)
+
         self._load()
-        outputs = self._model.process(items, normalize=normalize)
-        arr = self._to_numpy(outputs)
-        return arr.astype(np.float32)
+
+        def run_batch(batch_items: List[dict]) -> np.ndarray:
+            outputs = self._model.process(batch_items, normalize=normalize)
+            arr = self._to_numpy(outputs)
+            return arr.astype(np.float32)
+
+        def run_with_retry(batch_items: List[dict]) -> np.ndarray:
+            try:
+                return run_batch(batch_items)
+            except RuntimeError as exc:
+                msg = str(exc).lower()
+                if "out of memory" not in msg or len(batch_items) == 1:
+                    raise
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                mid = len(batch_items) // 2
+                left = run_with_retry(batch_items[:mid])
+                right = run_with_retry(batch_items[mid:])
+                return np.concatenate([left, right], axis=0)
+
+        all_embeddings: List[np.ndarray] = []
+        for start in range(0, len(items), self.batch_size):
+            batch = items[start : start + self.batch_size]
+            all_embeddings.append(run_with_retry(batch))
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        return np.concatenate(all_embeddings, axis=0)
 
     def embed_query(self, query: str, instruction: str) -> np.ndarray:
         items = [{"text": query, "instruction": instruction}]
         return self.embed_items(items, normalize=True)[0]
 
-    def embed_pages(self, pages: Iterable[PageRecord], instruction: str) -> np.ndarray:
+    def embed_chunks(self, chunks: Iterable[ChunkRecord], instruction: str) -> np.ndarray:
         items = []
-        for page in pages:
-            items.append({"text": page.text, "image": page.image_path, "instruction": instruction})
+        for chunk in chunks:
+            items.append({"text": chunk.text, "image": chunk.image_path, "instruction": instruction})
         if not items:
             return np.zeros((0, 1), dtype=np.float32)
         return self.embed_items(items, normalize=True)
