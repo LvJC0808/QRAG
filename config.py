@@ -38,6 +38,8 @@ class RuntimeConfig:
     ingest_text_chunk_chars: int = _env_int("QRAG_INGEST_TEXT_CHARS", 900)
     ingest_text_chunk_tokens: int = _env_int("QRAG_INGEST_TEXT_TOKENS", 220)
     ingest_text_overlap_tokens: int = _env_int("QRAG_INGEST_TEXT_OVERLAP", 40)
+    ingest_visual_caption: bool = os.getenv("QRAG_INGEST_VL_CAPTION", "1") == "1"
+    ingest_visual_caption_max_items: int = _env_int("QRAG_INGEST_VL_CAPTION_MAX_ITEMS", 48)
 
 
 @dataclass(slots=True)

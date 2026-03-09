@@ -77,4 +77,6 @@ def create_pipeline(runtime: RuntimeConfig | None = None) -> QRAGPipeline:
         generator=generator,
         judge=judge,
         retrieval_instruction=retrieval_instruction,
+        enable_visual_caption_enrichment=runtime.ingest_visual_caption,
+        visual_caption_max_items=runtime.ingest_visual_caption_max_items,
     )

@@ -1,0 +1,53 @@
+{
+  "num_docs": 2,
+  "num_samples": 60,
+  "avg_overall_score": 78.8,
+  "avg_gold_page_hit_rate": 0.6166666666666667,
+  "weighted_gold_page_hit_rate": 0.6166666666666667,
+  "avg_citation_validity": 81.25,
+  "avg_total_latency_s": 82.05321791707539,
+  "macro_avg_overall_score": 78.80000000000001,
+  "macro_avg_citation_validity": 81.25,
+  "macro_avg_total_latency_s": 82.05321791707539,
+  "doc_runs": [
+    {
+      "doc": "Introduction_to_Computer_Science",
+      "num_samples": 30,
+      "avg_overall_score": 77.9,
+      "gold_page_hit_rate": 0.7,
+      "avg_citation_validity": 82.33333333333333,
+      "output_dir": "/root/shared-nvme/QRAG/data/benchmarks/benchmark_20260304_030455_c2be31",
+      "run_id": "benchmark_20260304_030455_c2be31"
+    },
+    {
+      "doc": "Introduction_to_Python_Programming",
+      "num_samples": 30,
+      "avg_overall_score": 79.7,
+      "gold_page_hit_rate": 0.5333333333333333,
+      "avg_citation_validity": 80.16666666666667,
+      "output_dir": "/root/shared-nvme/QRAG/data/benchmarks/benchmark_20260304_034328_1aebd1",
+      "run_id": "benchmark_20260304_034328_1aebd1"
+    }
+  ],
+  "errors": [],
+  "args": {
+    "samples_dir": "/root/shared-nvme/QRAG/data/benchmark_samples/vidore_v3_cs",
+    "pdf_dir": "/root/shared-nvme/QRAG/vidore_v3_computer_science/pdfs",
+    "output_dir": "/root/shared-nvme/QRAG/data/benchmarks",
+    "python_executable": "",
+    "glob": "*.jsonl",
+    "max_docs": 0,
+    "max_samples_per_doc": 30,
+    "recall_top_k": 24,
+    "rerank_top_n": 8,
+    "evidence_top_m": 4,
+    "image_max_pixels": 1048576,
+    "max_new_tokens": 1200,
+    "temperature": 0.2,
+    "disable_revision": true,
+    "force_table": true,
+    "continue_on_error": false,
+    "dry_run": false
+  },
+  "generated_at": "2026-03-04 03:43:30"
+}

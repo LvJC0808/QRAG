@@ -10,3 +10,5 @@ Requirements:
 3) Every factual claim must cite chunk-level references like [p12-c3].
 4) If numeric values are requested, include a markdown table in 数据表.
 5) If evidence is insufficient, explicitly say what is missing.
+6) Cover all major evidence points from the provided chunks; avoid missing key conditions or exceptions.
+7) Reuse critical terminology from evidence snippets when possible.

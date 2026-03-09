@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import math
+import re
 import time
+from collections import Counter
 from pathlib import Path
 from typing import List, Optional
 
@@ -55,6 +58,10 @@ class QRAGPipeline:
         self.last_bundle: AnswerBundle | None = None
         self._chunks: List[ChunkRecord] = []
         self._chunk_lookup: dict[tuple[int, int], ChunkRecord] = {}
+        self._chunk_text_tf: dict[str, Counter[str]] = {}
+        self._chunk_doc_len: dict[str, int] = {}
+        self._idf: dict[str, float] = {}
+        self._avg_doc_len: float = 1.0
         self.visual_retrieval_instruction = (
             "Retrieve chunks with strong visual evidence, including figures, tables, and numeric details."
         )
@@ -87,6 +94,7 @@ class QRAGPipeline:
         self.index.build(embeddings, [chunk.model_dump() for chunk in chunks])
         self._chunks = chunks
         self._chunk_lookup = {(item.page_num, item.order): item for item in chunks}
+        self._build_lexical_index(chunks)
         self.state = PipelineState(
             doc_id=doc_id,
             index_path=str(index_path),
@@ -101,6 +109,7 @@ class QRAGPipeline:
         self.index.build(embeddings, [item.model_dump() for item in chunks])
         self._chunks = chunks
         self._chunk_lookup = {(item.page_num, item.order): item for item in chunks}
+        self._build_lexical_index(chunks)
         page_count = int(manifest.get("page_count", len({item.page_num for item in chunks})))
         self.state = PipelineState(
             doc_id=str(manifest.get("doc_id", "unknown")),
@@ -110,6 +119,125 @@ class QRAGPipeline:
             ready=True,
         )
         return self.state
+
+    @staticmethod
+    def _tokenize_text(text: str) -> List[str]:
+        return [tok.lower() for tok in re.findall(r"[A-Za-z0-9_]+", text or "")]
+
+    def _build_lexical_index(self, chunks: List[ChunkRecord]) -> None:
+        self._chunk_text_tf = {}
+        self._chunk_doc_len = {}
+        df: Counter[str] = Counter()
+
+        for chunk in chunks:
+            chunk_key = chunk.chunk_id or make_chunk_ref(chunk.page_num, chunk.order)
+            tokens = self._tokenize_text(chunk.text)
+            if not tokens:
+                continue
+            tf = Counter(tokens)
+            self._chunk_text_tf[chunk_key] = tf
+            self._chunk_doc_len[chunk_key] = len(tokens)
+            df.update(set(tokens))
+
+        n_docs = max(1, len(self._chunk_text_tf))
+        self._avg_doc_len = (
+            sum(self._chunk_doc_len.values()) / max(1, len(self._chunk_doc_len))
+            if self._chunk_doc_len
+            else 1.0
+        )
+        self._idf = {
+            term: math.log(1.0 + (n_docs - freq + 0.5) / (freq + 0.5))
+            for term, freq in df.items()
+        }
+
+    def _lexical_search(self, query: str, top_k: int) -> List[RetrievalCandidate]:
+        if not self._chunk_text_tf:
+            return []
+
+        query_tokens = self._tokenize_text(query)
+        if not query_tokens:
+            return []
+        q_terms = Counter(query_tokens)
+
+        k1 = 1.2
+        b = 0.75
+        scored: List[tuple[str, float]] = []
+        for chunk in self._chunks:
+            chunk_key = chunk.chunk_id or make_chunk_ref(chunk.page_num, chunk.order)
+            tf = self._chunk_text_tf.get(chunk_key)
+            if tf is None:
+                continue
+
+            dl = self._chunk_doc_len.get(chunk_key, 1)
+            score = 0.0
+            for term, qf in q_terms.items():
+                f = tf.get(term, 0)
+                if f <= 0:
+                    continue
+                idf = self._idf.get(term, 0.0)
+                denom = f + k1 * (1.0 - b + b * dl / self._avg_doc_len)
+                score += idf * ((f * (k1 + 1.0)) / max(1e-6, denom)) * (1.0 + 0.2 * qf)
+
+            if score > 0.0:
+                scored.append((chunk_key, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top = scored[: max(1, top_k)]
+        ref_lookup = {
+            (item.chunk_id or make_chunk_ref(item.page_num, item.order)): item
+            for item in self._chunks
+        }
+        results: List[RetrievalCandidate] = []
+        for chunk_key, score in top:
+            item = ref_lookup.get(chunk_key)
+            if item is None:
+                continue
+            results.append(
+                RetrievalCandidate(
+                    chunk_id=item.chunk_id,
+                    page_num=item.page_num,
+                    order=item.order,
+                    chunk_type=item.chunk_type,
+                    text=item.text,
+                    image_path=item.image_path,
+                    bbox=item.bbox,
+                    score=score,
+                )
+            )
+        return results
+
+    @staticmethod
+    def _query_profile(query: str) -> dict[str, bool]:
+        q = (query or "").lower()
+        broad_terms = (
+            "difference",
+            "compare",
+            "how",
+            "why",
+            "summarize",
+            "overview",
+            "关系",
+            "比较",
+            "区别",
+            "总结",
+            "原理",
+        )
+        numeric_terms = (
+            "number",
+            "value",
+            "table",
+            "chart",
+            "figure",
+            "准确率",
+            "数值",
+            "图",
+            "表",
+            "百分比",
+        )
+        return {
+            "needs_broad_context": any(term in q for term in broad_terms),
+            "needs_numeric_focus": any(term in q for term in numeric_terms),
+        }
 
     def _expand_with_neighbors(
         self, candidates: List[RetrievalCandidate], target_size: int
@@ -167,13 +295,9 @@ class QRAGPipeline:
 
     def _rrf_fuse(
         self,
-        primary: List[RetrievalCandidate],
-        secondary: List[RetrievalCandidate],
+        recall_streams: List[tuple[List[RetrievalCandidate], float]],
         top_k: int,
     ) -> List[RetrievalCandidate]:
-        if not secondary:
-            return primary[:top_k]
-
         denom = 60.0
         fusion: dict[str, tuple[RetrievalCandidate, float]] = {}
 
@@ -187,8 +311,10 @@ class QRAGPipeline:
                 else:
                     fusion[key] = (item, score)
 
-        add(primary, 0.7)
-        add(secondary, 0.3)
+        for items, weight in recall_streams:
+            if not items or weight <= 0.0:
+                continue
+            add(items, weight)
 
         ranked = sorted(fusion.values(), key=lambda x: x[1], reverse=True)
         output: List[RetrievalCandidate] = []
@@ -247,6 +373,17 @@ class QRAGPipeline:
 
         r_cfg = retrieval_config or self.default_retrieval_config()
         g_cfg = generation_config or self.default_generation_config()
+        profile = self._query_profile(query)
+
+        recall_top_k = int(r_cfg.recall_top_k)
+        rerank_top_n = int(r_cfg.rerank_top_n)
+        evidence_top_m = int(r_cfg.evidence_top_m)
+        if profile["needs_broad_context"]:
+            recall_top_k = min(64, max(recall_top_k, recall_top_k + 12))
+            rerank_top_n = min(20, max(rerank_top_n, rerank_top_n + 4))
+            evidence_top_m = min(8, max(evidence_top_m, evidence_top_m + 2))
+        if profile["needs_numeric_focus"]:
+            evidence_top_m = min(8, max(evidence_top_m, evidence_top_m + 1))
 
         timings: dict[str, float] = {}
 
@@ -258,10 +395,18 @@ class QRAGPipeline:
         timings["embedding_query_s"] = time.perf_counter() - t0
 
         t1 = time.perf_counter()
-        recall_main = self.index.search(query_vec, top_k=r_cfg.recall_top_k)
-        recall_visual = self.index.search(visual_query_vec, top_k=r_cfg.recall_top_k)
-        recall = self._rrf_fuse(recall_main, recall_visual, top_k=r_cfg.recall_top_k)
-        recall = self._expand_with_neighbors(recall, target_size=r_cfg.recall_top_k * 2)
+        recall_main = self.index.search(query_vec, top_k=recall_top_k)
+        recall_visual = self.index.search(visual_query_vec, top_k=recall_top_k)
+        recall_lexical = self._lexical_search(query, top_k=recall_top_k)
+        recall = self._rrf_fuse(
+            [
+                (recall_main, 0.50),
+                (recall_visual, 0.25),
+                (recall_lexical, 0.25),
+            ],
+            top_k=recall_top_k,
+        )
+        recall = self._expand_with_neighbors(recall, target_size=recall_top_k * 2)
         timings["dense_retrieval_s"] = time.perf_counter() - t1
 
         t2 = time.perf_counter()
@@ -269,11 +414,11 @@ class QRAGPipeline:
             query=query,
             candidates=recall,
             instruction=self.retrieval_instruction,
-            top_n=r_cfg.rerank_top_n,
+            top_n=rerank_top_n,
         )
         timings["rerank_s"] = time.perf_counter() - t2
 
-        evidence = self._build_evidence(reranked, evidence_top_m=r_cfg.evidence_top_m)
+        evidence = self._build_evidence(reranked, evidence_top_m=evidence_top_m)
 
         t3 = time.perf_counter()
         draft = self.generator.generate_answer(
@@ -289,6 +434,15 @@ class QRAGPipeline:
         timings["judge_s"] = time.perf_counter() - t4
 
         final_answer = draft
+        evidence_refs = {make_chunk_ref(item.page_num, item.order) for item in evidence}
+        cited_refs = set(extract_chunk_citations(final_answer))
+        if not cited_refs or not cited_refs.issubset(evidence_refs):
+            # Lightweight guardrail to improve citation validity even when revision is disabled.
+            appendix = ", ".join(f"[{ref}]" for ref in sorted(evidence_refs))
+            final_answer = (
+                f"{final_answer}\n\n### 证据引用清单\n"
+                f"{appendix}"
+            )
 
         if enable_revision and self.should_revise(
             judge_result.overall_score,

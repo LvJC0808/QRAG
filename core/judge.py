@@ -20,12 +20,20 @@ class Qwen3VLJudgeService:
         dtype: str = "bfloat16",
         attn_implementation: str = "flash_attention_2",
         judge_template: str = "",
+        do_sample: bool = True,
+        temperature: float = 0.2,
+        top_p: float = 0.9,
+        top_k: int = 20,
     ) -> None:
         self.model_path = model_path
         self.device = device
         self.dtype = dtype
         self.attn_implementation = attn_implementation
         self.judge_template = judge_template
+        self.do_sample = do_sample
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
         self._model = None
         self._processor = None
 
@@ -68,8 +76,10 @@ class Qwen3VLJudgeService:
             generated = self._model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                temperature=0.0,
-                do_sample=False,
+                do_sample=self.do_sample,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
             )
 
         trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs["input_ids"], generated)]

@@ -21,7 +21,7 @@ class PDFIngestor:
     def __init__(
         self,
         cache_root: Path,
-        dpi: int = 180,
+        dpi: int = 600,
         text_chunk_chars: int = 1200,
         text_chunk_tokens: int = 220,
         text_overlap_tokens: int = 40,
@@ -44,6 +44,51 @@ class PDFIngestor:
                 if txt:
                     spans.append(txt)
         return " ".join(spans).strip()
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return " ".join((text or "").split())
+
+    @staticmethod
+    def _clean_caption_text(text: str, max_chars: int = 320) -> str:
+        cleaned = " ".join((text or "").split())
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[: max_chars - 3] + "..."
+
+    def _is_noise_text_block(
+        self,
+        text: str,
+        bbox: tuple[float, float, float, float],
+        page_height: float,
+    ) -> bool:
+        cleaned = self._normalize_text(text).lower()
+        if not cleaned:
+            return True
+
+        # Typical running headers/footers in academic PDFs.
+        top_band = bbox[1] <= page_height * 0.09
+        bottom_band = bbox[3] >= page_height * 0.93
+        if top_band or bottom_band:
+            noise_terms = (
+                "published as",
+                "conference paper",
+                "under review",
+                "preprint",
+                "arxiv",
+                "copyright",
+                "all rights reserved",
+            )
+            if any(term in cleaned for term in noise_terms):
+                return True
+
+        # Ignore standalone page numbers in footer/header areas.
+        if top_band or bottom_band:
+            compact = cleaned.replace(" ", "")
+            if compact.isdigit() and len(compact) <= 4:
+                return True
+
+        return False
 
     @staticmethod
     def _sort_key(block: dict) -> tuple[float, float]:
@@ -125,22 +170,42 @@ class PDFIngestor:
 
     def _find_caption(self, image_bbox: tuple[float, float, float, float], text_blocks: List[_TextBlock]) -> str:
         _, y0, _, y1 = image_bbox
-        candidates: list[tuple[float, str]] = []
+        keyword_candidates: list[tuple[float, int, str]] = []
+        fallback_candidates: list[tuple[float, int, str]] = []
         keywords = ("figure", "fig.", "table", "图", "表")
 
         for block in text_blocks:
+            block_text = self._normalize_text(block.text)
+            if not block_text:
+                continue
             by0, by1 = block.bbox[1], block.bbox[3]
+            distance = 0.0
+            is_near = False
             if by0 >= y1 and by0 - y1 <= self.caption_window:
-                if any(key in block.text.lower() for key in keywords):
-                    candidates.append((by0 - y1, block.text))
+                distance = by0 - y1
+                is_near = True
             elif y0 >= by1 and y0 - by1 <= self.caption_window:
-                if any(key in block.text.lower() for key in keywords):
-                    candidates.append((y0 - by1, block.text))
+                distance = y0 - by1
+                is_near = True
 
-        if not candidates:
-            return ""
-        candidates.sort(key=lambda item: item[0])
-        return candidates[0][1]
+            if not is_near:
+                continue
+
+            lower = block_text.lower()
+            has_keyword = any(key in lower for key in keywords)
+            block_len = len(block_text)
+            if has_keyword:
+                keyword_candidates.append((distance, block_len, block_text))
+            elif 16 <= block_len <= 360:
+                fallback_candidates.append((distance, block_len, block_text))
+
+        if keyword_candidates:
+            keyword_candidates.sort(key=lambda item: (item[0], abs(item[1] - 120)))
+            return self._clean_caption_text(keyword_candidates[0][2])
+        if fallback_candidates:
+            fallback_candidates.sort(key=lambda item: (item[0], abs(item[1] - 120)))
+            return self._clean_caption_text(fallback_candidates[0][2])
+        return ""
 
     def ingest(self, pdf_path: str | Path) -> tuple[str, int, List[ChunkRecord]]:
         source = Path(pdf_path).expanduser().resolve()
@@ -177,7 +242,7 @@ class PDFIngestor:
                     bbox = tuple(float(v) for v in raw.get("bbox", [0, 0, 0, 0]))
                     if raw.get("type", 0) == 0:
                         text = self._block_text(raw)
-                        if text:
+                        if text and not self._is_noise_text_block(text, bbox, page_height):
                             text_blocks.append(_TextBlock(text=text, bbox=bbox))
                     elif raw.get("type", 0) == 1:
                         image_blocks.append(bbox)

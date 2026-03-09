@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import torch
 from qwen_vl_utils import process_vision_info
@@ -150,3 +150,97 @@ class Qwen3VLGeneratorService:
         )
         messages = [{"role": "user", "content": evidence_payload + [{"type": "text", "text": prompt}]}]
         return self._generate_from_messages(messages, config)
+
+    def describe_visual_evidence(
+        self,
+        query: str,
+        evidence: List[EvidenceItem],
+        image_max_pixels: int,
+        max_items: int = 3,
+    ) -> Dict[str, str]:
+        """Generate concise descriptions for visual evidence chunks keyed by chunk ref."""
+        figure_items = [
+            item
+            for item in evidence
+            if item.chunk_type.lower() in {"figure", "image", "table", "chart"}
+        ][: max(0, max_items)]
+        if not figure_items:
+            return {}
+
+        desc_cfg = GenerationConfig(max_new_tokens=220, temperature=0.1, force_table=False)
+        descriptions: Dict[str, str] = {}
+        for item in figure_items:
+            ref_id = make_chunk_ref(item.page_num, item.order)
+            prompt = (
+                "You are analyzing one scientific evidence image from a PDF.\n"
+                "Task:\n"
+                "1) Describe what is visually present in the image.\n"
+                "2) Explain the most question-relevant signal from this image.\n"
+                "Constraints:\n"
+                "- Use concise Chinese.\n"
+                "- Do not invent details not visible in the image.\n"
+                "- Keep within at most ten sentences.\n\n"
+                f"Question: {query}\n"
+                f"Evidence ref: [{ref_id}]\n"
+                f"Known snippet: {short_snippet(item.snippet, 200)}\n"
+                "Return plain text only."
+            )
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "image": f"file://{item.image_path}",
+                            "max_pixels": image_max_pixels,
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+            descriptions[ref_id] = self._generate_from_messages(messages, desc_cfg)
+        return descriptions
+
+    def caption_visual_chunks(
+        self,
+        visual_items: List[dict],
+        image_max_pixels: int,
+        max_items: int = 24,
+    ) -> Dict[str, str]:
+        """Generate neutral captions for visual chunks during indexing."""
+        if not visual_items:
+            return {}
+
+        cap_cfg = GenerationConfig(max_new_tokens=120, temperature=0.1, force_table=False)
+        captions: Dict[str, str] = {}
+        for item in visual_items[: max(0, max_items)]:
+            ref_id = str(item.get("ref_id", "")).strip()
+            image_path = str(item.get("image_path", "")).strip()
+            hint = short_snippet(str(item.get("hint", "")), 180)
+            if not ref_id or not image_path:
+                continue
+            prompt = (
+                "You are captioning a scientific PDF image chunk for retrieval indexing.\n"
+                "Write a concise Chinese description that captures the main visual content.\n"
+                "If there are visible chart/table/axes/title cues, mention them briefly.\n"
+                "Do not hallucinate precise values.\n"
+                "Keep within one sentence.\n"
+                f"Chunk ref: [{ref_id}]\n"
+                f"Optional text hint: {hint}\n"
+                "Return plain text only."
+            )
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "image": f"file://{image_path}",
+                            "max_pixels": image_max_pixels,
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+            captions[ref_id] = self._generate_from_messages(messages, cap_cfg)
+        return captions

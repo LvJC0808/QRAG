@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import io
+import os
 from pathlib import Path
 from typing import Any, List
 
@@ -8,7 +11,7 @@ import pandas as pd
 
 from .config import DATA_DIR
 from .core.tuner import JudgeTuner
-from .core.utils import make_chunk_ref
+from .core.utils import extract_chunk_citations, make_chunk_ref
 from .pipeline_factory import create_pipeline
 from .schemas import GenerationConfig, RetrievalConfig
 
@@ -75,6 +78,93 @@ def ingest_pdf(file_obj) -> str:
     return _format_state()
 
 
+def _is_visual_chunk(chunk_type: str) -> bool:
+    return chunk_type.lower() in {"figure", "image", "table", "chart"}
+
+
+def _select_visual_evidence(bundle, max_items: int = 3):
+    cited_refs = set(extract_chunk_citations(bundle.final_answer))
+
+    visual_items = []
+    for item in bundle.evidence_items:
+        if not _is_visual_chunk(item.chunk_type):
+            continue
+        ref_id = make_chunk_ref(item.page_num, item.order)
+        priority = 0 if ref_id in cited_refs else 1
+        visual_items.append((priority, item))
+
+    visual_items.sort(key=lambda pair: (pair[0], -pair[1].rerank_score))
+    return [item for _, item in visual_items[: max(0, max_items)]]
+
+
+def _image_to_data_uri(image_path: str, max_side: int = 960, max_bytes: int = 500_000) -> str | None:
+    path = Path(image_path)
+    if not path.exists():
+        return None
+
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            if max(img.size) > max_side:
+                img.thumbnail((max_side, max_side))
+            if img.mode not in {"RGB", "L"}:
+                img = img.convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80, optimize=True)
+            payload = buf.getvalue()
+    except Exception:  # noqa: BLE001
+        payload = path.read_bytes()
+        if len(payload) > max_bytes:
+            return None
+        suffix = path.suffix.lower()
+        mime = "image/png" if suffix == ".png" else "image/jpeg"
+        encoded = base64.b64encode(payload).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
+
+    if len(payload) > max_bytes:
+        return None
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _build_visual_answer_appendix(query: str, bundle, image_max_pixels: int, enabled: bool) -> tuple[str, dict[str, str]]:
+    if not enabled:
+        return bundle.final_answer, {}
+
+    selected_items = _select_visual_evidence(bundle, max_items=3)
+    if not selected_items:
+        return bundle.final_answer, {}
+
+    try:
+        descriptions = pipeline.generator.describe_visual_evidence(
+            query=query,
+            evidence=selected_items,
+            image_max_pixels=image_max_pixels,
+            max_items=len(selected_items),
+        )
+    except Exception:  # noqa: BLE001
+        return bundle.final_answer, {}
+
+    if not descriptions:
+        return bundle.final_answer, {}
+
+    lines = [bundle.final_answer, "", "### 图像证据解读（含原图）"]
+    for item in selected_items:
+        ref_id = make_chunk_ref(item.page_num, item.order)
+        desc = descriptions.get(ref_id)
+        if not desc:
+            continue
+        lines.append(f"#### [{ref_id}] 第{item.page_num}页（{item.chunk_type}）")
+        lines.append(desc)
+        data_uri = _image_to_data_uri(item.image_path)
+        if data_uri:
+            lines.append(f"![{ref_id}]({data_uri})")
+        else:
+            lines.append(f"_图片较大，未内嵌。请查看右侧证据图：{item.image_path}_")
+    return "\n\n".join(lines), descriptions
+
+
 def ask_question(
     query: str,
     recall_top_k: int,
@@ -85,6 +175,7 @@ def ask_question(
     temperature: float,
     force_table: bool,
     enable_revision: bool,
+    enable_visual_desc: bool,
 ):
     if not query.strip():
         return "Please input a question.", "", [], {}
@@ -107,16 +198,29 @@ def ask_question(
             generation_config=gen_cfg,
             enable_revision=enable_revision,
         )
+        final_answer, visual_desc = _build_visual_answer_appendix(
+            query=query,
+            bundle=bundle,
+            image_max_pixels=image_max_pixels,
+            enabled=enable_visual_desc,
+        )
         gallery = [
             (
                 item.image_path,
-                f"{make_chunk_ref(item.page_num, item.order)} (p{item.page_num}) | {item.chunk_type} | "
-                f"retrieval={item.retrieval_score:.3f} | rerank={item.rerank_score:.3f}",
+                (
+                    f"{make_chunk_ref(item.page_num, item.order)} (p{item.page_num}) | {item.chunk_type} | "
+                    f"retrieval={item.retrieval_score:.3f} | rerank={item.rerank_score:.3f}"
+                    + (
+                        f" | desc: {visual_desc.get(make_chunk_ref(item.page_num, item.order), '')[:80]}"
+                        if make_chunk_ref(item.page_num, item.order) in visual_desc
+                        else ""
+                    )
+                ),
             )
             for item in bundle.evidence_items
         ]
         bundle_dict = bundle.model_dump()
-        return bundle.final_answer, bundle.draft_answer, gallery, bundle_dict
+        return final_answer, bundle.draft_answer, gallery, bundle_dict
     except Exception as exc:  # noqa: BLE001
         return f"Pipeline error: {exc}", "", [], {}
 
@@ -163,8 +267,8 @@ def build_ui() -> gr.Blocks:
     default_g = pipeline.default_generation_config()
 
     with gr.Blocks(title="QRAG - Local Multimodal PDF QA") as demo:
-        gr.Markdown("# QRAG: Local Multimodal PDF QA (Qwen3-VL)")
-        gr.Markdown("Single-PDF multimodal RAG with Embedding+Reranker, LLM Judge, and tuning loop.")
+        gr.Markdown("# QRAG: Local Multimodal PDF QA ")
+        gr.Markdown("Single-PDF multimodal RAG with Qwen3-VL-Embedding+Qwen3-VL-Reranker, LLM Judge, and tuning loop.")
 
         last_bundle_state = gr.State({})
 
@@ -192,8 +296,9 @@ def build_ui() -> gr.Blocks:
                     temp_slider = gr.Slider(0.0, 1.0, value=default_g.temperature, step=0.05, label="temperature")
                     force_table_cb = gr.Checkbox(value=default_g.force_table, label="强制表格输出")
                     revision_cb = gr.Checkbox(value=True, label="启用 Judge 二次修订")
+                    visual_desc_cb = gr.Checkbox(value=True, label="生成图像描述并追加到答案")
 
-            evidence_gallery = gr.Gallery(label="证据页", columns=2, object_fit="contain", height=360)
+            evidence_gallery = gr.Gallery(label="证据图（含图像描述）", columns=2, object_fit="contain", height=360)
 
             ask_btn.click(
                 fn=ask_question,
@@ -207,6 +312,7 @@ def build_ui() -> gr.Blocks:
                     temp_slider,
                     force_table_cb,
                     revision_cb,
+                    visual_desc_cb,
                 ], 
                 outputs=[final_output, draft_output, evidence_gallery, last_bundle_state],
             )
@@ -222,7 +328,7 @@ def build_ui() -> gr.Blocks:
             refresh_btn = gr.Button("刷新最近一次报告")
             refresh_btn.click(fn=refresh_judge, inputs=[last_bundle_state], outputs=[judge_box])
 
-        with gr.Tab("调优实验室"):
+        with gr.Tab("调优"):
             tune_queries = gr.Textbox(
                 label="评测问题（每行一个）",
                 lines=8,
@@ -244,7 +350,19 @@ def build_ui() -> gr.Blocks:
 
 def main() -> None:
     demo = build_ui()
-    demo.queue().launch(server_name="0.0.0.0", share=False)
+    queued = demo.queue()
+    server_name = os.getenv("QRAG_SERVER_NAME", "0.0.0.0")
+    share = os.getenv("QRAG_GRADIO_SHARE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    try:
+        queued.launch(server_name=server_name, share=share)
+    except ValueError as exc:
+        err = str(exc)
+        if "shareable link must be created" in err and not share:
+            print("Localhost is not accessible in this environment; retrying with share=True...")
+            queued.launch(server_name=server_name, share=True)
+        else:
+            raise
 
 
 if __name__ == "__main__":

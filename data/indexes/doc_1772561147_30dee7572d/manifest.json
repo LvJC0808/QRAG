@@ -1,0 +1,7 @@
+{
+  "doc_id": "doc_1772561147_30dee7572d",
+  "chunk_count": 61,
+  "page_count": 8,
+  "embedding_dim": 4096,
+  "model_name": "qwen3-vl-embedding-8b"
+}
